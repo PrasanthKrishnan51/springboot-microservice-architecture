@@ -1,0 +1,205 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Product Service — application.yml
+#
+# Secrets (SPRING_DATA_MONGODB_URI, SPRING_KAFKA_BOOTSTRAP_SERVERS) have no
+# defaults and cause a fast startup failure if unset.
+#
+# Profile activation:
+#   (none)  → local development defaults
+#   docker  → merges the docker profile section on top
+#   prod    → merges the prod profile section on top
+# ══════════════════════════════════════════════════════════════════════════════
+
+server:
+  port: ${SERVER_PORT:8082}
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 10
+    connection-timeout: 2000ms
+
+# ── Spring Core ────────────────────────────────────────────────────────────────
+spring:
+  application:
+    name: product-service
+
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  data:
+    mongodb:
+      # No default — missing URI causes immediate startup failure.
+      uri: ${SPRING_DATA_MONGODB_URI}
+      # Disabled in all profiles — manage indexes via Mongock migrations.
+      # auto-index-creation: true on large collections locks writes during startup.
+      auto-index-creation: false
+
+  # ── Kafka Producer ──────────────────────────────────────────────────────────
+  kafka:
+    # No default — missing broker address causes immediate startup failure.
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # all: wait for all in-sync replicas to acknowledge — prevents data loss
+      # on broker failover. Use '1' only if you can tolerate lost events.
+      acks: all
+      retries: 3
+      properties:
+        # Idempotent producer — exactly-once delivery per partition.
+        # Requires acks=all and retries>0.
+        enable.idempotence: true
+        # Snappy gives ~50% size reduction with low CPU overhead.
+        # Use lz4 if your brokers are on the same host (lower latency).
+        compression.type: snappy
+        # How long the producer will wait to accumulate records into a batch.
+        # 5ms adds minimal latency while significantly improving throughput.
+        linger.ms: 5
+        # Maximum size of a request in bytes — protects brokers from oversized batches.
+        max.request.size: 1048576
+
+# ── Eureka Service Discovery ───────────────────────────────────────────────────
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    registry-fetch-interval-seconds: 10
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+# ── Actuator & Observability ──────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: always
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+      connect-timeout: 1s
+      read-timeout: 3s
+
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# ── OpenAPI / Swagger UI ──────────────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+# ── ELK / Logstash ────────────────────────────────────────────────────────────
+logstash:
+  host: ${LOGSTASH_HOST:localhost}
+  port: ${LOGSTASH_PORT:5000}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: WARN
+    com.ecommerce: DEBUG
+    org.apache.kafka: WARN
+    org.mongodb.driver: WARN
+    com.netflix.discovery: WARN
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCKER PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: mongodb://root:${MONGO_PASSWORD:-password}@mongodb:27017/product_db?authSource=admin
+
+  kafka:
+    bootstrap-servers: kafka:29092
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka:8761/eureka/
+
+management:
+  zipkin:
+    tracing:
+      endpoint: http://zipkin:9411/api/v2/spans
+
+logstash:
+  host: logstash
+
+logging:
+  level:
+    com.ecommerce: INFO
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROD PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  kafka:
+    producer:
+      properties:
+        # Production brokers replicate to 3 nodes — wait for all ISR acknowledgements.
+        # min.insync.replicas should be set to 2 on the broker side.
+        min.insync.replicas: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,prometheus,metrics"
+  endpoint:
+    health:
+      show-details: never
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+springdoc:
+  swagger-ui:
+    enabled: false
+  api-docs:
+    enabled: false
+
+logging:
+  level:
+    root: WARN
+    com.ecommerce: INFO

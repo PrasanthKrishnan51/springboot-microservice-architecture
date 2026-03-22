@@ -1,0 +1,49 @@
+{
+  "title": "E-Commerce — Service Overview",
+  "uid": "ecommerce-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [{
+      "name": "service", "type": "query",
+      "datasource": "Prometheus",
+      "query": "label_values(up, job)",
+      "multi": true, "includeAll": true
+    }]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "Services Up", "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [{ "expr": "sum(up{job=~"$service"})", "legendFormat": "Up" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "red", "value": 0 }, { "color": "green", "value": 1 }
+      ]}}}
+    },
+    {
+      "id": 2, "title": "HTTP Request Rate (rps)", "type": "timeseries",
+      "gridPos": { "x": 4, "y": 0, "w": 10, "h": 8 },
+      "targets": [{ "expr": "sum(rate(http_server_requests_seconds_count{job=~"$service"}[5m])) by (job)", "legendFormat": "{{job}}" }]
+    },
+    {
+      "id": 3, "title": "P95 Latency (ms)", "type": "timeseries",
+      "gridPos": { "x": 14, "y": 0, "w": 10, "h": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{job=~"$service"}[5m])) by (le,job)) * 1000", "legendFormat": "{{job}}" }]
+    },
+    {
+      "id": 4, "title": "5xx Error Rate (%)", "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [{ "expr": "rate(http_server_requests_seconds_count{status=~"5..",job=~"$service"}[5m]) / rate(http_server_requests_seconds_count{job=~"$service"}[5m]) * 100", "legendFormat": "{{job}}" }]
+    },
+    {
+      "id": 5, "title": "JVM Heap Usage (%)", "type": "gauge",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [{ "expr": "jvm_memory_used_bytes{area="heap",job=~"$service"} / jvm_memory_max_bytes{area="heap",job=~"$service"} * 100", "legendFormat": "{{job}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [
+        { "color": "green", "value": 0 }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }
+      ]}}}
+    }
+  ]
+}

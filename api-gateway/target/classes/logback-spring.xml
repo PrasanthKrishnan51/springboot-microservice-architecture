@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback-spring.xml — API Gateway
+  ════════════════════════════════════════════════════════════════════════════
+  Appenders
+  ─────────
+    CONSOLE        Human-readable pattern. Active in non-prod profiles only.
+    LOGSTASH       LogstashTcpSocketAppender → JSON → ELK pipeline.
+    ASYNC_LOGSTASH AsyncAppender wrapper around LOGSTASH (non-blocking).
+    FILE           Rolling JSON file — local backup / fallback when Logstash
+                   is unreachable. Wrapped in ASYNC_FILE for non-blocking I/O.
+    ASYNC_FILE     AsyncAppender wrapper around FILE.
+
+  MDC fields forwarded to Elasticsearch
+  ──────────────────────────────────────
+    traceId · spanId · correlationId · userId · requestUri · method
+
+  Profile behaviour
+  ─────────────────
+    (default / local / docker)  DEBUG on com.ecommerce, CONSOLE active
+    prod                        INFO  on com.ecommerce, CONSOLE suppressed,
+                                tighter async queues, WARN root level
+  ════════════════════════════════════════════════════════════════════════════
+-->
+<configuration>
+
+    <!--
+      Graceful shutdown hook — flushes async queues before JVM exit so that logs
+      emitted during Spring's graceful-shutdown drain period are not lost.
+      The 1-second delay matches typical async queue drain time.
+    -->
+    <shutdownHook class="ch.qos.logback.core.hook.DelayingShutdownHook">
+        <delay>1000</delay>
+    </shutdownHook>
+
+    <!-- ── Spring property bindings ──────────────────────────────────────────── -->
+    <springProperty scope="context" name="APP_NAME"
+                    source="spring.application.name" defaultValue="api-gateway"/>
+    <springProperty scope="context" name="APP_PORT"
+                    source="server.port" defaultValue="8080"/>
+    <springProperty scope="context" name="LOG_HOST"
+                    source="logstash.host" defaultValue="localhost"/>
+    <springProperty scope="context" name="LOG_PORT"
+                    source="logstash.port" defaultValue="5000"/>
+    <springProperty scope="context" name="ACTIVE_PROFILE"
+                    source="spring.profiles.active" defaultValue="local"/>
+
+    <!-- ── CONSOLE ────────────────────────────────────────────────────────── -->
+    <!--
+      Human-readable output for local development.
+      Full date (yyyy-MM-dd) prevents ambiguous timestamps in sessions that
+      span midnight. Suppressed in the prod profile.
+    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] [%X{correlationId:-}]
+                %logger{35} - %msg%n
+            </pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ── LOGSTASH (TCP → ELK) ──────────────────────────────────────────── -->
+    <!--
+      Streams structured JSON to Logstash over TCP.
+      - connectionTimeout: short so a missing Logstash instance does not stall startup
+      - reconnectionDelay: back off before retrying a failed connection
+      - keepAliveDuration: prevent idle TCP connections from being silently dropped
+                           by network infrastructure (firewalls, NAT tables)
+    -->
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <destination>${LOG_HOST}:${LOG_PORT}</destination>
+        <connectionTimeout>5000</connectionTimeout>
+        <reconnectionDelay>10 seconds</reconnectionDelay>
+        <keepAliveDuration>5 minutes</keepAliveDuration>
+
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!--
+              Custom fields appear on every log document in Elasticsearch.
+              Used for cross-service filtering: service=api-gateway env=prod
+            -->
+            <customFields>{"service":"${APP_NAME}","port":"${APP_PORT}","env":"${ACTIVE_PROFILE}"}</customFields>
+
+            <!-- Rename built-in fields to match the ELK pipeline's expected schema -->
+            <fieldNames>
+                <timestamp>@timestamp</timestamp>
+                <thread>thread</thread>
+                <logger>logger</logger>
+                <level>level</level>
+                <!-- levelValue is redundant alongside level — omit it -->
+                <levelValue>[ignore]</levelValue>
+            </fieldNames>
+
+            <!--
+              MDC fields forwarded to Elasticsearch.
+              All six are populated by MdcFilter / JwtAuthenticationFilter on every
+              request. Adding them here ensures they appear on every log line that
+              is part of a request lifecycle — essential for distributed tracing
+              and per-request log correlation in Kibana.
+            -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
+            <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <includeMdcKeyName>requestUri</includeMdcKeyName>
+            <includeMdcKeyName>method</includeMdcKeyName>
+
+            <!-- Include the stack trace as a structured field, not embedded in message -->
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerCause>30</maxDepthPerCause>
+                <shortenedClassNameLength>20</shortenedClassNameLength>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- ── ASYNC_LOGSTASH ─────────────────────────────────────────────────── -->
+    <!--
+      Non-blocking wrapper around LOGSTASH.
+
+      queueSize=1024  — sized for a gateway handling ~500 rps with bursts.
+                        Each entry is a reference (~64 bytes), so 1024 entries
+                        ≈ 64 KB heap. Increase if ASYNC_LOGSTASH.queueSize
+                        metric approaches saturation in Grafana.
+
+      discardingThreshold=0 — never discard based on level; discard only when
+                              the queue is full. Combined with neverBlock=true
+                              this means: never block the app thread, never
+                              preferentially drop WARN/INFO — drop the oldest
+                              entry uniformly when the queue is full.
+
+      neverBlock=true — application thread is never blocked waiting for log
+                        delivery. A full queue causes silent drops, which is
+                        preferable to back-pressure on request-handling threads.
+
+      maxFlushTime=5000 — on JVM shutdown the async appender waits up to 5s
+                          to drain the queue (the shutdownHook above gives it
+                          the time window to do so).
+    -->
+    <appender name="ASYNC_LOGSTASH" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="LOGSTASH"/>
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <maxFlushTime>5000</maxFlushTime>
+        <includeCallerData>false</includeCallerData>
+    </appender>
+
+    <!-- ── FILE (rolling JSON — local backup) ────────────────────────────── -->
+    <!--
+      JSON rolling file. Serves as a local fallback when Logstash is unreachable
+      and as a persistent audit trail for environments without centralised logging.
+
+      Includes the same MDC fields as the Logstash appender so the file is
+      usable for distributed-trace debugging without Elasticsearch.
+
+      Rolling policy:
+        - Rolls daily AND when a single file exceeds 100 MB
+        - maxHistory=60 days of rolled files retained
+        - totalSizeCap=5 GB hard cap across all rolled files
+          Note: maxHistory counts rolled FILES, not days. With SizeAndTimeBased
+          rolling, a busy day may produce multiple files. Set maxHistory to a
+          value that reflects desired retention independent of file count.
+    -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+            <totalSizeCap>5GB</totalSizeCap>
+            <!-- Delete oldest on startup if totalSizeCap is already exceeded -->
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"service":"${APP_NAME}","env":"${ACTIVE_PROFILE}"}</customFields>
+            <!-- Same MDC fields as the Logstash appender — file must be independently useful -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
+            <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <includeMdcKeyName>requestUri</includeMdcKeyName>
+            <includeMdcKeyName>method</includeMdcKeyName>
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerCause>30</maxDepthPerCause>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- ── ASYNC_FILE ─────────────────────────────────────────────────────── -->
+    <!--
+      Non-blocking wrapper around FILE.
+      Without this, every log call blocks the application thread on disk I/O.
+      Same rationale as ASYNC_LOGSTASH; smaller queue is sufficient because
+      the file appender is much faster than a TCP socket.
+    -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE"/>
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <maxFlushTime>5000</maxFlushTime>
+        <includeCallerData>false</includeCallerData>
+    </appender>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         LOGGERS
+         ══════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Application code — DEBUG locally so filter decisions are visible -->
+    <logger name="com.ecommerce" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <!-- Gateway route resolution and filter chain — INFO is sufficient -->
+    <logger name="org.springframework.cloud.gateway" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <!-- Netty internals — WARN to suppress channel lifecycle noise -->
+    <logger name="reactor.netty" level="WARN" additivity="false">
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <!-- Resilience4j state transitions — INFO so circuit open/close events are captured -->
+    <logger name="io.github.resilience4j" level="INFO" additivity="false">
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <!-- Eureka client — WARN to suppress heartbeat and registry refresh noise -->
+    <logger name="com.netflix.discovery" level="WARN" additivity="false">
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <!-- ── Root logger — catch-all for everything not explicitly named ──── -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="ASYNC_FILE"/>
+    </root>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         PROFILES
+         ══════════════════════════════════════════════════════════════════════ -->
+
+    <!--
+      PROD profile:
+      - Root level raised to WARN — INFO is too verbose for production volume
+      - com.ecommerce raised to INFO — DEBUG generates ~10x more log lines
+      - CONSOLE suppressed — no interactive terminal in containerised prod,
+        stdout just duplicates what goes to Logstash
+      - Async queue sizes increased — higher prod traffic needs larger buffers
+    -->
+    <springProfile name="prod">
+
+        <logger name="com.ecommerce" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_LOGSTASH"/>
+            <appender-ref ref="ASYNC_FILE"/>
+        </logger>
+
+        <logger name="org.springframework.cloud.gateway" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_LOGSTASH"/>
+            <appender-ref ref="ASYNC_FILE"/>
+        </logger>
+
+        <root level="WARN">
+            <appender-ref ref="ASYNC_LOGSTASH"/>
+            <appender-ref ref="ASYNC_FILE"/>
+        </root>
+
+    </springProfile>
+</configuration>

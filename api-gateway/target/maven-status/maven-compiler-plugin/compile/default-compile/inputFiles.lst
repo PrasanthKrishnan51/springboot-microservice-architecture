@@ -1,0 +1,5 @@
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/api-gateway/src/main/java/com/ecommerce/apigateway/ApiGatewayApplication.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/api-gateway/src/main/java/com/ecommerce/apigateway/controller/FallbackController.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/api-gateway/src/main/java/com/ecommerce/apigateway/filter/JwtAuthenticationFilter.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/api-gateway/src/main/java/com/ecommerce/apigateway/filter/RequestLoggingFilter.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/api-gateway/src/main/java/com/ecommerce/apigateway/security/JwtUtil.java

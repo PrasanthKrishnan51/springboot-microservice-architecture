@@ -1,0 +1,266 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Order Service — application.yml
+#
+# Secrets (SPRING_DATA_MONGODB_URI, SPRING_KAFKA_BOOTSTRAP_SERVERS) have no
+# defaults and cause a fast startup failure if unset.
+#
+# Profile activation:
+#   (none)  → local development defaults
+#   docker  → merges the docker profile section on top
+#   prod    → merges the prod profile section on top
+# ══════════════════════════════════════════════════════════════════════════════
+
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 10
+    connection-timeout: 2000ms
+
+# ── Spring Core ────────────────────────────────────────────────────────────────
+spring:
+  application:
+    name: order-service
+
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+      auto-index-creation: false
+
+  # ── Kafka Producer + Consumer ───────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        compression.type: snappy
+        linger.ms: 5
+        max.request.size: 1048576
+
+    consumer:
+      # Dedicated group — orders must process their own event stream independently
+      # of any other service that also consumes product-events.
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:order-service-group}
+      # earliest: replay missed events after a restart or rebalance.
+      # latest would silently skip events produced while the service was down.
+      auto-offset-reset: earliest
+      # Disable auto-commit — offsets are committed only after the listener
+      # method completes successfully. Prevents message loss on processing failure.
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        # Trust only our own event classes — prevents deserialization attacks
+        # from malicious producers publishing unexpected type headers.
+        spring.json.trusted.packages: "com.ecommerce.*"
+        # Ignore type headers — use VALUE_DEFAULT_TYPE from KafkaConfig instead.
+        # Prevents ClassNotFoundException when producer and consumer have
+        # different package structures or when consuming cross-service events.
+        spring.json.use.type.headers: false
+        # Maximum time (ms) the consumer will block waiting for records.
+        # Lower values reduce rebalance latency; higher values improve throughput.
+        max.poll.interval.ms: 300000
+        # Maximum records returned in a single poll — limits processing batch size.
+        max.poll.records: 500
+
+# ── Feign Client (REST → product-service) ─────────────────────────────────────
+feign:
+  client:
+    config:
+      default:
+        # 5s connect + read timeout at the Feign level.
+        # Must be less than the gateway's order-cb timelimiter (8s) so Feign
+        # fails before the gateway circuit breaker fires on the outer request.
+        connectTimeout: 5000
+        readTimeout: 5000
+        loggerLevel: basic
+  # Enable Resilience4j circuit breaker on all Feign clients
+  circuitbreaker:
+    enabled: true
+
+# ── Resilience4j (Feign circuit breaker) ──────────────────────────────────────
+resilience4j:
+  circuitbreaker:
+    instances:
+      product-service:
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        slowCallRateThreshold: 50
+        slowCallDurationThreshold: 2s
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        registerHealthIndicator: true
+  timelimiter:
+    instances:
+      product-service:
+        # Must be < feign.client.config.default.readTimeout (5000ms)
+        # so Resilience4j fires before Feign's own timeout.
+        timeoutDuration: 4s
+
+# ── Eureka Service Discovery ───────────────────────────────────────────────────
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    registry-fetch-interval-seconds: 10
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+# ── Actuator & Observability ──────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: always
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+      connect-timeout: 1s
+      read-timeout: 3s
+
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# ── OpenAPI / Swagger UI ──────────────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+# ── ELK / Logstash ────────────────────────────────────────────────────────────
+logstash:
+  host: ${LOGSTASH_HOST:localhost}
+  port: ${LOGSTASH_PORT:5000}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: WARN
+    com.ecommerce: DEBUG
+    org.apache.kafka: WARN
+    org.mongodb.driver: WARN
+    com.netflix.discovery: WARN
+    feign: WARN
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCKER PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: mongodb://root:${MONGO_PASSWORD:-password}@mongodb:27017/order_db?authSource=admin
+
+  kafka:
+    bootstrap-servers: kafka:29092
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka:8761/eureka/
+
+management:
+  zipkin:
+    tracing:
+      endpoint: http://zipkin:9411/api/v2/spans
+
+logstash:
+  host: logstash
+
+logging:
+  level:
+    com.ecommerce: INFO
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROD PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  kafka:
+    producer:
+      properties:
+        min.insync.replicas: 2
+    consumer:
+      properties:
+        # Reduce poll interval in prod — faster rebalance detection.
+        max.poll.interval.ms: 120000
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      product-service:
+        # Larger window in prod gives more stable failure-rate signals.
+        slidingWindowSize: 20
+        minimumNumberOfCalls: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,prometheus,metrics"
+  endpoint:
+    health:
+      show-details: never
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+springdoc:
+  swagger-ui:
+    enabled: false
+  api-docs:
+    enabled: false
+
+logging:
+  level:
+    root: WARN
+    com.ecommerce: INFO

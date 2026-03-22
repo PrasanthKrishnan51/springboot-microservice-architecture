@@ -1,0 +1,225 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# User Service — application.yml
+#
+# All secrets MUST be supplied via environment variables or a secret manager.
+# Any value with no default (e.g. JWT_SECRET, SPRING_DATA_MONGODB_URI) causes
+# a fast startup failure if unset — this is intentional and correct behaviour.
+#
+# Profile activation:
+#   (none)  → local development defaults
+#   docker  → merges the docker profile section on top
+#   prod    → merges the prod profile section on top
+# ══════════════════════════════════════════════════════════════════════════════
+
+server:
+  port: ${SERVER_PORT:8081}
+  # Drain in-flight requests before shutdown — prevents dropped login/register
+  # requests during rolling Kubernetes deployments.
+  # Must be < Kubernetes terminationGracePeriodSeconds (typically 30s).
+  shutdown: graceful
+  tomcat:
+    # Max threads for handling concurrent requests
+    threads:
+      max: 200
+      min-spare: 10
+    # Time to wait for a connection from the pool before failing
+    connection-timeout: 2000ms
+
+# ── Spring Core ────────────────────────────────────────────────────────────────
+spring:
+  application:
+    name: user-service
+
+  lifecycle:
+    # Grace period for in-flight requests — allow login/register to complete
+    timeout-per-shutdown-phase: 20s
+
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  data:
+    mongodb:
+      # No default — missing URI causes immediate startup failure rather than
+      # silently connecting to a local MongoDB with default credentials.
+      uri: ${SPRING_DATA_MONGODB_URI}
+      # auto-index-creation scans all entities and creates missing indexes on
+      # every startup. Safe locally, but in production with large collections
+      # it causes startup latency spikes and can lock collections.
+      # Disabled here — manage indexes via Mongock or manual migrations.
+      auto-index-creation: false
+
+# ── JWT ────────────────────────────────────────────────────────────────────────
+jwt:
+  # No default — missing secret causes immediate startup failure.
+  # The JwtService constructor validates minimum length (32 bytes).
+  # Generate: openssl rand -base64 32
+  secret: ${JWT_SECRET}
+
+  # Access token lifetime in milliseconds.
+  # 15 minutes (900000 ms) is the recommended maximum for short-lived tokens.
+  expiration: ${JWT_EXPIRATION:900000}
+
+# ── Eureka Service Discovery ───────────────────────────────────────────────────
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    # Pull updated registry every 10s — default 30s means newly started services
+    # are invisible to this service for up to 30 seconds after they register.
+    registry-fetch-interval-seconds: 10
+    # User service must register so the gateway and other services can find it.
+    register-with-eureka: true
+    fetch-registry:       true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds:    10
+    # Explicit expiry — without this Eureka takes up to 90s (default) to evict
+    # a dead instance. 30s matches the 3× renewal interval convention.
+    lease-expiration-duration-in-seconds: 30
+
+# ── Actuator & Observability ──────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        # Expose all locally — locked down to essentials in the prod profile.
+        include: "*"
+  endpoint:
+    health:
+      # when-authorized — avoids leaking MongoDB URI, Eureka host, and other
+      # internal topology to unauthenticated callers via /actuator/health.
+      show-details:    when-authorized
+      show-components: always
+      probes:
+        # Activates /actuator/health/liveness and /actuator/health/readiness
+        # as dedicated Kubernetes probe targets with correct lifecycle semantics.
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  # Distributed tracing — 100% locally so every request is visible in Zipkin.
+  # Overridden to 10% in the prod profile.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint:        http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+      connect-timeout: 1s
+      read-timeout:    3s
+
+  # Prometheus scrape endpoint
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  # Metric tags applied to every meter — appear in Grafana label selectors
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# ── OpenAPI / Swagger UI ──────────────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path:    /swagger-ui.html
+    # Point "Try it out" at the gateway rather than directly at this service.
+    # Without this, Swagger UI sends requests directly to port 8081, bypassing
+    # the JWT filter and rate limiter on the gateway.
+    servers-override: false
+
+# ── ELK / Logstash ────────────────────────────────────────────────────────────
+logstash:
+  host: ${LOGSTASH_HOST:localhost}
+  port: ${LOGSTASH_PORT:5000}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# Fine-grained level control is in logback-spring.xml.
+# These entries are a secondary override for quick adjustments without
+# redeploying a new logback config (e.g. temporarily raising Feign to DEBUG).
+logging:
+  level:
+    root:                          WARN
+    com.ecommerce:                 DEBUG
+    org.springframework.security:  WARN
+    org.mongodb.driver:            WARN
+    com.netflix.discovery:         WARN
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCKER PROFILE — overrides applied when SPRING_PROFILES_ACTIVE=docker
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: mongodb://root:${MONGO_PASSWORD:-password}@mongodb:27017/user_db?authSource=admin
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka:8761/eureka/
+
+management:
+  zipkin:
+    tracing:
+      endpoint: http://zipkin:9411/api/v2/spans
+
+logstash:
+  host: logstash
+
+logging:
+  level:
+    com.ecommerce: INFO
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROD PROFILE — overrides applied when SPRING_PROFILES_ACTIVE=prod
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  data:
+    mongodb:
+      # auto-index-creation is already false in base — explicit reminder here.
+      auto-index-creation: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Never expose heapdump, env, threaddump, or configprops in production.
+        # These endpoints leak secrets, heap contents, and internal topology.
+        include: "health,info,prometheus,metrics"
+  endpoint:
+    health:
+      # Never expose internal component details to unauthenticated callers in prod.
+      show-details: never
+  tracing:
+    sampling:
+      # 10% in production — tune up temporarily via TRACING_SAMPLE_RATE env var
+      # for debugging without a full redeployment.
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+springdoc:
+  # Disable Swagger UI in production — API documentation should be served
+  # from a dedicated docs environment, not from production instances.
+  swagger-ui:
+    enabled: false
+  api-docs:
+    enabled: false
+
+logging:
+  level:
+    root:          WARN
+    com.ecommerce: INFO

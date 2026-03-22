@@ -1,0 +1,384 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# API Gateway — application.yml
+#
+# All secrets MUST be supplied via environment variables or a secret manager.
+# Defaults are provided only for non-sensitive local-development values.
+# Any secret with no default will cause a fast startup failure if unset —
+# this is intentional and correct behaviour.
+#
+# Profile activation:
+#   (none)  → local development defaults (this base document only)
+#   docker  → merges the docker profile section on top
+#   prod    → merges the prod profile section on top
+# ══════════════════════════════════════════════════════════════════════════════
+
+server:
+  port: 8080
+  # Drain in-flight requests before shutdown — prevents 502s during rolling deploys.
+  # Must be < Kubernetes terminationGracePeriodSeconds.
+  shutdown: graceful
+  netty:
+    connection-timeout: 2s
+    idle-timeout: 15s
+
+# ── Spring Core ────────────────────────────────────────────────────────────────
+spring:
+  application:
+    name: api-gateway
+
+  lifecycle:
+    # Grace period for in-flight requests during shutdown
+    timeout-per-shutdown-phase: 20s
+
+  # ── Redis — rate limiting ───────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # No default — application fails at startup if this is unset.
+      # This prevents silent deployment with an open Redis instance.
+      password: ${REDIS_PASSWORD}
+      timeout: 2000ms
+      connect-timeout: 1000ms
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 2
+          max-wait: 1000ms
+
+  # ── Spring Cloud Gateway ────────────────────────────────────────────────────
+  cloud:
+    gateway:
+      metrics:
+        enabled: true
+
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+
+      # ── CORS ─────────────────────────────────────────────────────────────────
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            # Restrict in prod via CORS_ALLOWED_ORIGINS env var
+            allowedOriginPatterns: ${CORS_ALLOWED_ORIGINS:*}
+            allowedMethods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+            allowedHeaders: "*"
+            exposedHeaders: "X-Correlation-Id,X-Request-Id"
+            allowCredentials: false
+            maxAge: 3600
+
+      # ── Default filters applied to every route ────────────────────────────
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+        # Reject oversized request bodies before they reach downstream services
+        - name: RequestSize
+          args:
+            maxSize: 10MB
+
+      # ── Routes ───────────────────────────────────────────────────────────────
+      routes:
+
+        # ── User Service ────────────────────────────────────────────────────
+        - id: user-service
+          uri: lb://user-service
+          predicates:
+            - Path=/api/v1/users/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: user-cb
+                fallbackUri: forward:/fallback/users
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 100
+                redis-rate-limiter.burstCapacity: 150
+                redis-rate-limiter.requestedTokens: 1
+            - name: Retry
+              args:
+                retries: 2
+                statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE,GATEWAY_TIMEOUT
+                # Only retry idempotent methods — retrying POST would duplicate registrations
+                methods: GET,HEAD
+                backoff:
+                  firstBackoff: 100ms
+                  maxBackoff: 500ms
+                  factor: 2
+                  basedOnPreviousValue: false
+
+        # ── Product Service ─────────────────────────────────────────────────
+        - id: product-service
+          uri: lb://product-service
+          predicates:
+            - Path=/api/v1/products/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: product-cb
+                fallbackUri: forward:/fallback/products
+            - name: RequestRateLimiter
+              args:
+                # Products are read-heavy — allow higher throughput
+                redis-rate-limiter.replenishRate: 200
+                redis-rate-limiter.burstCapacity: 400
+                redis-rate-limiter.requestedTokens: 1
+            - name: Retry
+              args:
+                retries: 3
+                statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE,GATEWAY_TIMEOUT
+                methods: GET,HEAD
+                backoff:
+                  firstBackoff: 50ms
+                  maxBackoff: 500ms
+                  factor: 2
+                  basedOnPreviousValue: false
+
+        # ── Order Service ───────────────────────────────────────────────────
+        - id: order-service
+          uri: lb://order-service
+          predicates:
+            - Path=/api/v1/orders/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: order-cb
+                fallbackUri: forward:/fallback/orders
+            - name: RequestRateLimiter
+              args:
+                # Lower rate — order creation is expensive across multiple downstream services
+                redis-rate-limiter.replenishRate: 50
+                redis-rate-limiter.burstCapacity: 100
+                redis-rate-limiter.requestedTokens: 1
+            # No Retry on orders — POST is not idempotent; retrying would duplicate orders
+
+# ── JWT ────────────────────────────────────────────────────────────────────────
+jwt:
+  # No default — missing secret causes immediate startup failure.
+  # Generate a secure value: openssl rand -base64 32
+  secret: ${JWT_SECRET}
+
+  # Rejects tokens whose `iss` claim does not match (empty = skip check)
+  expected-issuer: ${JWT_EXPECTED_ISSUER:}
+  # Rejects tokens not intended for this gateway (empty = skip check)
+  expected-audience: ${JWT_EXPECTED_AUDIENCE:}
+
+# ── Gateway custom properties ─────────────────────────────────────────────────
+gateway:
+  # RequestLoggingFilter emits SLOW_REQUEST warn when a request exceeds this
+  slow-request-threshold-ms: ${SLOW_REQUEST_THRESHOLD_MS:1000}
+
+# ── Eureka Service Discovery ───────────────────────────────────────────────────
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    # Pull updated registry every 10s — default 30s is too slow for fast failover
+    registry-fetch-interval-seconds: 10
+    # Gateway is not a downstream service — do not register it
+    register-with-eureka: false
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+# ── Resilience4j ──────────────────────────────────────────────────────────────
+resilience4j:
+  circuitbreaker:
+    configs:
+      # Shared baseline — instances override only what genuinely differs.
+      # Adding a new route? Create an instance with baseConfig: default
+      # and only specify the properties that are different.
+      default:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        # Also open on slow calls — prevents latency build-up from
+        # successful-but-slow responses that never trip on errors alone
+        slowCallRateThreshold: 50
+        slowCallDurationThreshold: 2s
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        registerHealthIndicator: true
+        recordExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.cloud.gateway.support.NotFoundException
+
+    instances:
+      user-cb:
+        baseConfig: default
+
+      product-cb:
+        baseConfig: default
+        # Read-heavy — tolerate more failures before opening
+        slidingWindowSize: 20
+        failureRateThreshold: 60
+
+      order-cb:
+        baseConfig: default
+        # Critical path — open faster, stay open longer
+        failureRateThreshold: 40
+        waitDurationInOpenState: 15s
+
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 5s
+        cancelRunningFuture: true
+    instances:
+      user-cb: { timeoutDuration: 3s }
+      product-cb: { timeoutDuration: 3s }
+      # Orders call product-service internally via Feign —
+      # budget must exceed the product-service timeout
+      order-cb: { timeoutDuration: 8s }
+
+  # Bulkhead — limits concurrent in-flight calls per service.
+  # Prevents one slow downstream from exhausting all Netty threads
+  # and causing the gateway to appear unresponsive to all services.
+  bulkhead:
+    instances:
+      user-cb: { maxConcurrentCalls: 50,  maxWaitDuration: 500ms }
+      product-cb: { maxConcurrentCalls: 100, maxWaitDuration: 200ms }
+      order-cb: { maxConcurrentCalls: 30,  maxWaitDuration: 1s }
+
+# ── Actuator & Observability ──────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: "*"   # Restricted to essential endpoints in the prod profile
+  endpoint:
+    health:
+      # when-authorized — avoids exposing internal topology (hosts, ports,
+      # connection strings) to unauthenticated callers via /actuator/health
+      show-details: when-authorized
+      show-components: always
+      probes:
+        # Activates /actuator/health/liveness and /actuator/health/readiness
+        # for use as Kubernetes liveness and readiness probe targets
+        enabled: true
+    gateway:
+      enabled: true
+
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  # Distributed tracing
+  tracing:
+    sampling:
+      # 100% locally so every request is visible in Zipkin during development.
+      # Overridden per-profile below.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+      connect-timeout: 1s
+      read-timeout: 3s
+
+  # Prometheus scrape endpoint
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  metrics:
+    tags:
+      # These tags appear in every Grafana label selector
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# ── ELK / Logstash ────────────────────────────────────────────────────────────
+logstash:
+  host: ${LOGSTASH_HOST:localhost}
+  port: ${LOGSTASH_PORT:5000}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: WARN
+    com.ecommerce: DEBUG
+    org.springframework.cloud.gateway: INFO
+    reactor.netty: WARN
+    io.github.resilience4j: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] [%X{correlationId:-}] %logger{30} - %msg%n"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCKER PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    redis:
+      host: redis
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka:8761/eureka/
+
+management:
+  zipkin:
+    tracing:
+      endpoint: http://zipkin:9411/api/v2/spans
+
+logstash:
+  host: logstash
+
+logging:
+  level:
+    com.ecommerce: INFO
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROD PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Never expose env, heapdump, threaddump or configprops in production
+        include: "health,info,prometheus,metrics,circuitbreakers,gateway"
+  endpoint:
+    health:
+      # Never expose internal topology in production
+      show-details: never
+  tracing:
+    sampling:
+      # 10% sampling in production — tune up temporarily for debugging
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        # Larger window in production gives more stable failure-rate signals
+        slidingWindowSize: 20
+        minimumNumberOfCalls: 10
+
+gateway:
+  # Tighter slow-request threshold in production
+  slow-request-threshold-ms: 500
+
+logging:
+  level:
+    root: WARN
+    com.ecommerce: INFO

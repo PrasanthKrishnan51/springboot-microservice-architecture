@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback-spring.xml — user-service
+  ════════════════════════════════════════════════════════════════════════════
+  Shared pattern: copy this file to every microservice and change only the
+  two defaultValue attributes on APP_NAME / APP_PORT. Everything else is
+  driven at runtime from application.yml via <springProperty>.
+
+  Appenders
+  ─────────
+    CONSOLE        Human-readable pattern. Active in all non-prod profiles.
+    LOGSTASH       LogstashTcpSocketAppender → JSON → ELK pipeline.
+    ASYNC_LOGSTASH AsyncAppender wrapper around LOGSTASH (non-blocking).
+    FILE           SizeAndTimeBased rolling JSON file — local fallback.
+    ASYNC_FILE     AsyncAppender wrapper around FILE (non-blocking).
+
+  MDC fields forwarded to Elasticsearch
+  ──────────────────────────────────────
+    traceId · spanId · correlationId · userId · requestUri · method
+
+  Profile behaviour
+  ─────────────────
+    local / docker   DEBUG on com.ecommerce, CONSOLE active
+    prod             INFO  on com.ecommerce, CONSOLE suppressed, root → WARN
+  ════════════════════════════════════════════════════════════════════════════
+-->
+<configuration>
+
+  <!--
+    Graceful shutdown hook — flushes both async queues before JVM exit.
+    Without this, log events buffered at shutdown (Spring context closing,
+    last health check, Kafka consumer group leave) are silently discarded.
+    The 1-second delay matches typical async queue drain time and works
+    together with maxFlushTime=5000 on each AsyncAppender below.
+  -->
+  <shutdownHook class="ch.qos.logback.core.hook.DelayingShutdownHook">
+    <delay>1000</delay>
+  </shutdownHook>
+
+  <!-- ── Spring property bindings ──────────────────────────────────────────
+    These pull live values from application.yml into Logback's context.
+    defaultValue is only a fallback for the brief window before Spring
+    has loaded its environment — in normal operation the source wins.
+
+    TO REUSE THIS FILE: change only the two defaultValue attributes below.
+  ─────────────────────────────────────────────────────────────────────── -->
+  <springProperty scope="context" name="APP_NAME"
+                  source="spring.application.name" defaultValue="user-service"/>
+  <springProperty scope="context" name="APP_PORT"
+                  source="server.port"              defaultValue="8081"/>
+  <springProperty scope="context" name="LOG_HOST"
+                  source="logstash.host"            defaultValue="localhost"/>
+  <springProperty scope="context" name="LOG_PORT"
+                  source="logstash.port"            defaultValue="5000"/>
+  <springProperty scope="context" name="PROFILE"
+                  source="spring.profiles.active"   defaultValue="local"/>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       APPENDERS
+       ══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- ── CONSOLE ────────────────────────────────────────────────────────── -->
+  <!--
+    Human-readable output for local development and docker (where stdout
+    is collected by the Docker log driver / kubectl logs).
+    Full date prevents ambiguous timestamps in sessions that span midnight.
+    Suppressed in the prod springProfile block below.
+  -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] [%X{correlationId:-}] %logger{35} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <!-- ── LOGSTASH (TCP → ELK) ──────────────────────────────────────────── -->
+  <!--
+    Streams structured JSON to Logstash over a persistent TCP connection.
+    connectionTimeout: prevents an indefinite hang at startup when
+                       Logstash is unreachable (5s is generous but bounded).
+    reconnectionDelay: back off before retrying after a broken connection.
+    keepAliveDuration: prevents idle TCP connections from being silently
+                       dropped by firewalls or NAT tables in cloud VPCs.
+  -->
+  <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+    <destination>${LOG_HOST}:${LOG_PORT}</destination>
+    <connectionTimeout>5000</connectionTimeout>
+    <reconnectionDelay>10 seconds</reconnectionDelay>
+    <keepAliveDuration>5 minutes</keepAliveDuration>
+
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <!--
+        These three fields appear on every Elasticsearch document.
+        service + env is the primary filter combination in Kibana when
+        debugging a specific service across multiple environments.
+      -->
+      <customFields>{"service":"${APP_NAME}","port":"${APP_PORT}","env":"${PROFILE}"}</customFields>
+
+      <!-- Align field names with the ELK pipeline's expected schema -->
+      <fieldNames>
+        <timestamp>@timestamp</timestamp>
+        <thread>thread</thread>
+        <logger>logger</logger>
+        <level>level</level>
+        <!-- levelValue duplicates level as an integer — not useful in Kibana -->
+        <levelValue>[ignore]</levelValue>
+      </fieldNames>
+
+      <!--
+        MDC fields forwarded to every Elasticsearch document.
+        Populated by MdcFilter on every inbound request.
+        These are the fields that make Kibana queries like
+        correlationId:"abc-123" or traceId:"xyz" work across services.
+      -->
+      <includeMdcKeyName>traceId</includeMdcKeyName>
+      <includeMdcKeyName>spanId</includeMdcKeyName>
+      <includeMdcKeyName>correlationId</includeMdcKeyName>
+      <includeMdcKeyName>userId</includeMdcKeyName>
+      <includeMdcKeyName>requestUri</includeMdcKeyName>
+      <includeMdcKeyName>method</includeMdcKeyName>
+
+      <!--
+        Formats exception stack traces as a structured JSON field rather
+        than embedding them as a raw multiline string in the message field.
+        rootCauseFirst=true puts the root cause at the top — in Kibana you
+        see the actual error immediately without scrolling past framework frames.
+      -->
+      <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+        <maxDepthPerCause>30</maxDepthPerCause>
+        <shortenedClassNameLength>20</shortenedClassNameLength>
+        <rootCauseFirst>true</rootCauseFirst>
+      </throwableConverter>
+    </encoder>
+  </appender>
+
+  <!-- ── ASYNC_LOGSTASH ─────────────────────────────────────────────────── -->
+  <!--
+    Non-blocking wrapper around LOGSTASH.
+    The application thread enqueues a log event reference (~64 bytes) and
+    returns immediately. A background thread handles the TCP write.
+
+    queueSize=1024: sized for a service under auth + profile load. At 500 rps
+                    with two log lines per request the queue holds ~1s of
+                    backlog before drops occur. Each slot is ~64 bytes
+                    (a reference) so 1024 slots ≈ 64 KB heap cost.
+
+    discardingThreshold=0: do not preferentially drop WARN/INFO events when
+                           the queue is 80% full (Logback's default behaviour).
+                           Drop uniformly only when the queue is completely full.
+
+    neverBlock=true: the application thread never waits for queue space.
+                     A full queue causes silent drops, which is always
+                     preferable to back-pressure on request-handling threads.
+
+    maxFlushTime=5000: on JVM shutdown the appender waits up to 5s to drain
+                       the queue — the shutdownHook above provides the window.
+  -->
+  <appender name="ASYNC_LOGSTASH" class="ch.qos.logback.classic.AsyncAppender">
+    <appender-ref ref="LOGSTASH"/>
+    <queueSize>1024</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <neverBlock>true</neverBlock>
+    <maxFlushTime>5000</maxFlushTime>
+    <includeCallerData>false</includeCallerData>
+  </appender>
+
+  <!-- ── FILE (rolling JSON — local fallback) ──────────────────────────── -->
+  <!--
+    JSON rolling file. Two purposes:
+      1. Fallback when Logstash is temporarily unreachable.
+      2. Persistent audit trail in environments without centralised logging.
+
+    Uses the modern SizeAndTimeBasedRollingPolicy (single flat policy class)
+    rather than the deprecated TimeBasedRollingPolicy + SizeAndTimeBasedFNATP
+    nested combination.
+
+    Includes all six MDC fields — the file must be independently usable for
+    distributed-trace debugging without Elasticsearch. If you have to grep
+    a local file during an incident, correlationId must be in the file.
+
+    maxHistory counts rolled FILES not days. With 100 MB file size on a
+    busy service, one day may produce several files. 60 files ≈ 30 days
+    of actual coverage on a moderately loaded service.
+  -->
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>logs/${APP_NAME}.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>logs/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>100MB</maxFileSize>
+      <maxHistory>60</maxHistory>
+      <totalSizeCap>5GB</totalSizeCap>
+      <!-- Enforce cap immediately on restart, not only at the next roll event -->
+      <cleanHistoryOnStart>true</cleanHistoryOnStart>
+    </rollingPolicy>
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <customFields>{"service":"${APP_NAME}","env":"${PROFILE}"}</customFields>
+      <!-- Same MDC fields as LOGSTASH — file must be independently useful -->
+      <includeMdcKeyName>traceId</includeMdcKeyName>
+      <includeMdcKeyName>spanId</includeMdcKeyName>
+      <includeMdcKeyName>correlationId</includeMdcKeyName>
+      <includeMdcKeyName>userId</includeMdcKeyName>
+      <includeMdcKeyName>requestUri</includeMdcKeyName>
+      <includeMdcKeyName>method</includeMdcKeyName>
+      <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+        <maxDepthPerCause>30</maxDepthPerCause>
+        <rootCauseFirst>true</rootCauseFirst>
+      </throwableConverter>
+    </encoder>
+  </appender>
+
+  <!-- ── ASYNC_FILE ─────────────────────────────────────────────────────── -->
+  <!--
+    Non-blocking wrapper around FILE.
+    Without this, every log call blocks the calling thread on disk I/O.
+    On a user service under login burst or bulk-registration load,
+    synchronous file writes become a measurable latency contributor.
+    Smaller queue than ASYNC_LOGSTASH — disk is faster than TCP.
+  -->
+  <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+    <appender-ref ref="FILE"/>
+    <queueSize>512</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <neverBlock>true</neverBlock>
+    <maxFlushTime>5000</maxFlushTime>
+    <includeCallerData>false</includeCallerData>
+  </appender>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       LOGGERS
+       ══════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    additivity="false" on every named logger prevents log events from
+    propagating up to the root logger after being handled here.
+    Without it every line is written twice — once by the named logger
+    and once by the root logger.
+  -->
+
+  <!-- Application code — DEBUG locally so business logic decisions are visible -->
+  <logger name="com.ecommerce"          level="DEBUG" additivity="false">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </logger>
+
+  <!--
+    MongoDB driver — INFO logs every command sent and received.
+    WARN captures only connection failures and timeout events.
+  -->
+  <logger name="org.mongodb.driver"     level="WARN"  additivity="false">
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </logger>
+
+  <!--
+    Eureka client — heartbeat and registry refresh at INFO every 10-30s.
+    Hundreds of zero-signal lines per hour in Elasticsearch.
+  -->
+  <logger name="com.netflix.discovery"  level="WARN"  additivity="false">
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </logger>
+
+  <!--
+    Resilience4j — circuit breaker state transitions (CLOSED → OPEN → HALF_OPEN)
+    are operationally important. INFO ensures they appear in Kibana dashboards.
+  -->
+  <logger name="io.github.resilience4j" level="INFO"  additivity="false">
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </logger>
+
+
+  <!--
+    Spring Security — INFO logs every authentication/authorization decision.
+    WARN captures only genuine security failures (bad credentials, locked accounts).
+  -->
+  <logger name="org.springframework.security" level="WARN" additivity="false">
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </logger>
+
+  <!-- ── Root logger — catch-all for all other packages ────────────────── -->
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="ASYNC_LOGSTASH"/>
+    <appender-ref ref="ASYNC_FILE"/>
+  </root>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       PROFILES
+       ══════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    PROD profile changes:
+    ─────────────────────
+    1. com.ecommerce → INFO  (DEBUG generates ~10x more volume, exposes internals)
+    2. CONSOLE removed       (no interactive terminal in containerised prod;
+                              stdout duplicates what already goes to Logstash)
+    3. root → WARN           (INFO is too verbose at production traffic levels)
+    4. resilience4j stays at INFO — circuit breaker events must remain visible
+
+    Named loggers redeclare their appender list explicitly to remove CONSOLE.
+    Without this, a logger with additivity=false would still write to CONSOLE
+    because its appender list is set by the base config block above, not
+    inherited from the prod root override.
+  -->
+  <springProfile name="prod">
+
+    <logger name="com.ecommerce"          level="INFO" additivity="false">
+      <appender-ref ref="ASYNC_LOGSTASH"/>
+      <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <logger name="io.github.resilience4j" level="INFO" additivity="false">
+      <appender-ref ref="ASYNC_LOGSTASH"/>
+      <appender-ref ref="ASYNC_FILE"/>
+    </logger>
+
+    <root level="WARN">
+      <appender-ref ref="ASYNC_LOGSTASH"/>
+      <appender-ref ref="ASYNC_FILE"/>
+    </root>
+
+  </springProfile>
+
+  <!--
+    DOCKER profile: base config applies unchanged.
+    CONSOLE stays active — container stdout is collected by the Docker log
+    driver and forwarded to whatever log aggregator the host is configured
+    to use (CloudWatch, Fluentd, Loki, etc.).
+  -->
+
+</configuration>

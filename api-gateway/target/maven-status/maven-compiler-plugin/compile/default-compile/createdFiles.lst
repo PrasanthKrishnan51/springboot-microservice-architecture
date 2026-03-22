@@ -1,0 +1,7 @@
+com/ecommerce/apigateway/controller/FallbackController$FallbackResponse.class
+com/ecommerce/apigateway/filter/JwtAuthenticationFilter$ErrorResponse.class
+com/ecommerce/apigateway/filter/RequestLoggingFilter.class
+com/ecommerce/apigateway/filter/JwtAuthenticationFilter.class
+com/ecommerce/apigateway/security/JwtUtil.class
+com/ecommerce/apigateway/controller/FallbackController.class
+com/ecommerce/apigateway/ApiGatewayApplication.class

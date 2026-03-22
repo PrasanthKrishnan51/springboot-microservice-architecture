@@ -1,0 +1,17 @@
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/ProductServiceApplication.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/config/KafkaConfig.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/config/SecurityConfig.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/controller/ProductController.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/domain/Product.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/dto/CreateProductRequest.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/dto/ProductResponse.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/dto/StockUpdateRequest.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/dto/UpdateProductRequest.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/event/ProductEvent.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/exception/GlobalExceptionHandler.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/exception/InsufficientStockException.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/exception/ProductNotFoundException.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/filter/MdcFilter.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/mapper/ProductMapper.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/repository/ProductRepository.java
+/Users/prasanth/PK/Pk Workspace/springboot-microservice-architecture/product-service/src/main/java/com/ecommerce/productservice/service/ProductService.java
