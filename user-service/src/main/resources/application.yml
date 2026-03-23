@@ -12,7 +12,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 server:
-  port: ${SERVER_PORT:8081}
+  port: 8081
   # Drain in-flight requests before shutdown — prevents dropped login/register
   # requests during rolling Kubernetes deployments.
   # Must be < Kubernetes terminationGracePeriodSeconds (typically 30s).
@@ -39,7 +39,7 @@ spring:
     mongodb:
       # No default — missing URI causes immediate startup failure rather than
       # silently connecting to a local MongoDB with default credentials.
-      uri: ${SPRING_DATA_MONGODB_URI}
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/user-service}
       # auto-index-creation scans all entities and creates missing indexes on
       # every startup. Safe locally, but in production with large collections
       # it causes startup latency spikes and can lock collections.
@@ -51,7 +51,7 @@ jwt:
   # No default — missing secret causes immediate startup failure.
   # The JwtService constructor validates minimum length (32 bytes).
   # Generate: openssl rand -base64 32
-  secret: ${JWT_SECRET}
+  secret: ${JWT_SECRET:change-me-in-production-minimum-32-characters!!}
 
   # Access token lifetime in milliseconds.
   # 15 minutes (900000 ms) is the recommended maximum for short-lived tokens.

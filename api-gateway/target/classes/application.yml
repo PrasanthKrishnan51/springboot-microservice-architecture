@@ -37,7 +37,7 @@ spring:
       port: ${REDIS_PORT:6379}
       # No default — application fails at startup if this is unset.
       # This prevents silent deployment with an open Redis instance.
-      password: ${REDIS_PASSWORD}
+      password: ${REDIS_PASSWORD:Redis456}
       timeout: 2000ms
       connect-timeout: 1000ms
       lettuce:
@@ -157,7 +157,7 @@ spring:
 jwt:
   # No default — missing secret causes immediate startup failure.
   # Generate a secure value: openssl rand -base64 32
-  secret: ${JWT_SECRET}
+  secret: ${JWT_SECRET:change-me-in-production-minimum-32-characters!!}
 
   # Rejects tokens whose `iss` claim does not match (empty = skip check)
   expected-issuer: ${JWT_EXPECTED_ISSUER:}

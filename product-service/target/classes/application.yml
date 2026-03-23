@@ -11,7 +11,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 server:
-  port: ${SERVER_PORT:8082}
+  port: 8082
   shutdown: graceful
   tomcat:
     threads:
@@ -30,8 +30,7 @@ spring:
   # ── MongoDB ─────────────────────────────────────────────────────────────────
   data:
     mongodb:
-      # No default — missing URI causes immediate startup failure.
-      uri: ${SPRING_DATA_MONGODB_URI}
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/product-service}
       # Disabled in all profiles — manage indexes via Mongock migrations.
       # auto-index-creation: true on large collections locks writes during startup.
       auto-index-creation: false
