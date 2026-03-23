@@ -23,6 +23,9 @@ HELP.md
 *.class
 *.jar
 *.jar.original
+*.lst
+*.log
+*.log.gz
 
 ### NetBeans ###
 /nbproject/private/

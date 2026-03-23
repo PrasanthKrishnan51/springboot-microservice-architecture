@@ -81,10 +81,17 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             "/api/v1/users/login",
             "/api/v1/products",
             "/api/v1/products/**",
+
             "/actuator/**",
             "/fallback/**",
+
             "/v3/api-docs/**",
-            "/swagger-ui/**"
+            "/*/v3/api-docs",
+            "/*/v3/api-docs/**",
+
+            "/swagger-ui.html",
+            "/swagger-ui/**",
+            "/webjars/**"
     );
 
     private static final AntPathMatcher PATH_MATCHER = new AntPathMatcher();

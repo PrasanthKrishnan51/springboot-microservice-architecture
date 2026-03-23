@@ -12,6 +12,7 @@
     <name>Spring Boot E-Commerce Microservices</name>
 
     <modules>
+        <module>eureka-server</module>
         <module>api-gateway</module>
         <module>product-service</module>
         <module>order-service</module>
