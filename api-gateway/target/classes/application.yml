@@ -80,19 +80,20 @@ spring:
 
       # ── Routes ───────────────────────────────────────────────────────────────
       routes:
-
         # ── User Service ────────────────────────────────────────────────────
         - id: user-service
-          uri: lb://user-service
+          uri: lb://USER-SERVICE
           predicates:
-            - Path=/api/v1/users/**
+            - Path=/user-service/**,/api/v1/users/**
           filters:
+            - RewritePath=/user-service/(?<segment>.*), /${segment}
             - name: CircuitBreaker
               args:
                 name: user-cb
                 fallbackUri: forward:/fallback/users
             - name: RequestRateLimiter
               args:
+                key-resolver: "#{@userKeyResolver}"
                 redis-rate-limiter.replenishRate: 100
                 redis-rate-limiter.burstCapacity: 150
                 redis-rate-limiter.requestedTokens: 1
@@ -110,7 +111,7 @@ spring:
 
         # ── Product Service ─────────────────────────────────────────────────
         - id: product-service
-          uri: lb://product-service
+          uri: lb://PRODUCT-SERVICE
           predicates:
             - Path=/api/v1/products/**
           filters:
@@ -137,7 +138,7 @@ spring:
 
         # ── Order Service ───────────────────────────────────────────────────
         - id: order-service
-          uri: lb://order-service
+          uri: lb://ORDER-SERVICE
           predicates:
             - Path=/api/v1/orders/**
           filters:

@@ -1,5 +1,6 @@
 HELP.md
-/target/
+target/
+**/target/
 /.idea/
 /*iml/
 .mvn/wrapper/maven-wrapper.jar
@@ -23,9 +24,12 @@ HELP.md
 *.class
 *.jar
 *.jar.original
-*.lst
 *.log
 *.log.gz
+
+# Maven compiler
+createdFiles.lst
+inputFiles.lst
 
 ### NetBeans ###
 /nbproject/private/

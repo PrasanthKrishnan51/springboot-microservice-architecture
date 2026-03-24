@@ -30,7 +30,7 @@ spring:
   # ── MongoDB ─────────────────────────────────────────────────────────────────
   data:
     mongodb:
-      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/product-service}
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/ecommerce}
       # Disabled in all profiles — manage indexes via Mongock migrations.
       # auto-index-creation: true on large collections locks writes during startup.
       auto-index-creation: false

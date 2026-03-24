@@ -39,7 +39,7 @@ spring:
     mongodb:
       # No default — missing URI causes immediate startup failure rather than
       # silently connecting to a local MongoDB with default credentials.
-      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/user-service}
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/ecommerce}
       # auto-index-creation scans all entities and creates missing indexes on
       # every startup. Safe locally, but in production with large collections
       # it causes startup latency spikes and can lock collections.
@@ -161,7 +161,7 @@ spring:
 
   data:
     mongodb:
-      uri: mongodb://root:${MONGO_PASSWORD:-password}@mongodb:27017/user_db?authSource=admin
+      uri: mongodb://root:${MONGO_PASSWORD:-password}@mongodb:27017/ecommerce?authSource=admin
 
 eureka:
   client:
